@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ESP32 Realtime Dashboard</title>
+  <style>
+    body {
+      font-family: system-ui;
+      margin: 20px;
+      background: #f9fafb;
+    }
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 16px;
+      max-width: 420px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      background: #fff;
+    }
+    .info {
+      margin-bottom: 10px;
+      font-size: 15px;
+    }
+    #toggle {
+      width: 120px;
+      height: 40px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+      color: #fff;
+      transition: 0.2s;
+    }
+    #toggle.on { background-color: #22c55e; }
+    #toggle.off { background-color: #ef4444; }
+    #status { margin-top: 10px; color: #555; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h2>ESP32 Realtime Dashboard</h2>
+  <div class="card">
+    <div class="info">🌡 Temp: <span id="t">-</span> °C</div>
+    <div class="info">💧 Hum : <span id="h">-</span> %</div>
+    <div class="info">🕒 Time: <span id="ts">-</span></div>
+    <hr>
+    <button id="toggle" class="off">LED: OFF</button>
+    <div id="status"></div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    const BASE = "https://scornful-chiquita-thanawat-628a00c6.koyeb.app"; // เปลี่ยนเป็นโดเมน backend ของคุณ
+    const socket = io(BASE);
+
+    const T = document.getElementById('t');
+    const H = document.getElementById('h');
+    const TS = document.getElementById('ts');
+    const ST = document.getElementById('status');
+    const BTN = document.getElementById('toggle');
+
+    let ledState = false; // เริ่มต้นปิด
+
+    // ✅ ดึงสถานะล่าสุดจาก backend ตอนเปิดเว็บ
+    async function fetchCurrentState() {
+      try {
+        const res = await fetch(`${BASE}/command`);
+        const data = await res.json();
+        if (data && data.command && typeof data.command.led === "boolean") {
+          ledState = data.command.led;
+          updateButton();
+        }
+      } catch (err) {
+        console.error("Failed to fetch current state", err);
+        ST.textContent = "⚠️ Cannot fetch LED state";
+      }
+    }
+
+    // อัปเดตข้อมูลเซนเซอร์สดจาก backend
+    socket.on('telemetry', data => {
+      T.textContent = data.temp ?? '-';
+      H.textContent = data.hum ?? '-';
+      TS.textContent = new Date(data.ts).toLocaleString();
+    });
+
+    // ซิงก์คำสั่งล่าสุดจาก server แบบเรียลไทม์
+    socket.on('command-queued', cmd => {
+      if (cmd.led !== undefined) {
+        ledState = cmd.led;
+        updateButton();
+      }
+    });
+
+    // คลิกปุ่ม toggle เพื่อสลับสถานะ LED
+    BTN.onclick = () => {
+      ledState = !ledState;
+      socket.emit('set-command', { led: ledState });
+      updateButton();
+    };
+
+    // ฟังก์ชันอัปเดต UI ของปุ่ม
+    function updateButton() {
+      if (ledState) {
+        BTN.classList.remove('off');
+        BTN.classList.add('on');
+        BTN.textContent = 'LED: ON';
+      } else {
+        BTN.classList.remove('on');
+        BTN.classList.add('off');
+        BTN.textContent = 'LED: OFF';
+      }
+    }
+
+    // 🏁 เริ่มต้นโหลดสถานะปัจจุบัน
+    fetchCurrentState();
+  </script>
+</body>
+</html>

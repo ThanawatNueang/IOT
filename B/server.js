@@ -1,45 +1,83 @@
+// server.js
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+
 const app = express();
 const server = http.createServer(app);
+
 const { Server } = require('socket.io');
 const io = new Server(server, {
   cors: { origin: "*" },
-  transports: ['websocket', 'polling'], // รองรับทุกกรณี
+  transports: ['websocket', 'polling'],
   pingInterval: 25000,
   pingTimeout: 60000,
 });
+
+const WebSocket = require('ws');
+const wss = new WebSocket.Server({ server, path: '/ws' });
 
 app.use(cors());
 app.use(express.json());
 
 let latest = { temp: null, hum: null, ts: null };
-let pendingCommand = null; // คำสั่งล่าสุดสำหรับ ESP32 (ดึงครั้งเดียวแล้วเคลียร์)
+/** เก็บ client ของ ESP32 ที่ต่อผ่าน WS */
+const espClients = new Set();
 
-// REST: ESP32 ส่งค่าเข้ามา
-app.post('/ingest', (req, res) => {
-  latest = { ...req.body, ts: Date.now() };
-  io.emit('telemetry', latest);           // push ไป dashboard แบบ realtime
-  return res.json({ ok: true });
-});
+/** ===== WebSocket สำหรับ ESP32 ===== */
+wss.on('connection', (ws) => {
+  espClients.add(ws);
+  console.log('[ESP] connected. Total ESP:', espClients.size);
 
-// REST: ESP32 มาดึงคำสั่ง (ถ้ามี)
-app.get('/command', (req, res) => {
-  res.json({ command: pendingCommand });
-}); 
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
 
-// หน้าเว็บอยากดูค่าล่าสุดแบบกดรีเฟรช
-app.get('/latest', (req, res) => res.json(latest));
+      // ESP ส่ง telemetry: {type:'telemetry', temp, hum, rssi, ...}
+      if (msg.type === 'telemetry') {
+        latest = { ...msg, ts: Date.now() };
+        io.emit('telemetry', latest); // push ไปแดชบอร์ดแบบ realtime
+      }
 
-// Socket.IO: Dashboard ส่งคำสั่งไปให้ ESP32
-io.on('connection', (socket) => {
-  console.log('dashboard connected');
-  socket.on('set-command', (cmd) => {
-    pendingCommand = cmd;                  // เช่น {led:true, pwm:128}
-    io.emit('command-queued', cmd);
+      // ESP ขอ snapshot ล่าสุด (ไม่จำเป็น แต่เผื่อไว้)
+      if (msg.type === 'hello') {
+        ws.send(JSON.stringify({ type: 'hello-ack', ts: Date.now() }));
+      }
+    } catch (e) {
+      console.error('WS parse error:', e);
+    }
+  });
+
+  ws.on('close', () => {
+    espClients.delete(ws);
+    console.log('[ESP] disconnected. Total ESP:', espClients.size);
   });
 });
 
+/** ===== Socket.IO สำหรับเว็บแดชบอร์ด ===== */
+io.on('connection', (socket) => {
+  console.log('[Dashboard] connected');
+
+  // ส่งค่าล่าสุดให้ทันทีเมื่อมีคนเข้ามา
+  if (latest.ts) socket.emit('telemetry', latest);
+
+  // แดชบอร์ดสั่งคำสั่งไปยัง ESP ทั้งหมด
+  // ตัวอย่าง payload: { led: true } หรือ { led:false, pwm:128 }
+  socket.on('set-command', (cmd) => {
+    const payload = JSON.stringify({ type: 'command', ...cmd });
+    for (const ws of espClients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
+    io.emit('command-queued', cmd);
+  });
+
+  socket.on('disconnect', () => {
+    console.log('[Dashboard] disconnected');
+  });
+});
+
+/** REST เผื่อ debug/ดึงค่าล่าสุด */
+app.get('/latest', (req, res) => res.json(latest));
+
 const PORT = process.env.PORT || 8088;
-server.listen(PORT, () => console.log('Server on', PORT));
+server.listen(PORT, () => console.log('Server listening on', PORT));
